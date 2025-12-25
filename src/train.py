@@ -1,51 +1,117 @@
-import pandas as pd
+
+
+from fastapi import FastAPI
+from pydantic import BaseModel
 import joblib
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
+import time
 
 from src.preprocessing import clean_text
 
-DATA_PATH = "data/raw/support_tickets.csv"
+# -----------------------
+# Load model artifacts
+# -----------------------
+
 MODEL_PATH = "models/ticket_classifier.pkl"
 VECTORIZER_PATH = "models/tfidf_vectorizer.pkl"
 
-def train_model():
-    df = pd.read_csv(DATA_PATH)
+model = joblib.load(MODEL_PATH)
+vectorizer = joblib.load(VECTORIZER_PATH)
 
-    # Combine and clean text
-    df["text"] = (df["subject"] + " " + df["description"]).apply(clean_text)
+#compute priority score
+def compute_priority(text, category, timestamp):
+    urgency = 0.0
 
-    X = df["text"]
-    y = df["category"]
+    urgent_words = ["urgent", "immediately", "blocked", "down", "refund", "crash"]
+    for word in urgent_words:
+        if word in text.lower():
+            urgency += 0.15
 
-    # TF-IDF Vectorizer
-    vectorizer = TfidfVectorizer(
-        ngram_range=(1, 2),
-        stop_words="english",
-        max_features=5000
+    category_weight = {
+        "Bug Report": 0.4,
+        "Billing Inquiry": 0.3,
+        "Technical Issue": 0.25,
+        "Account Management": 0.2,
+        "Feature Request": 0.1
+    }
+
+    urgency += category_weight.get(category, 0.2)
+
+    # time decay (simplified example)
+    urgency = min(urgency, 1.0)
+    return urgency
+
+# -----------------------
+# FastAPI app
+# -----------------------
+
+app = FastAPI(
+    title="Customer Support Ticket Auto-Triage API",
+    description="Classifies customer support tickets into predefined categories",
+    version="1.0"
+)
+
+# -----------------------
+# Request schema
+# -----------------------
+
+class TicketRequest(BaseModel):
+    subject: str
+    description: str
+
+# -----------------------
+# Response schema
+# -----------------------
+
+class TicketResponse(BaseModel):
+    predicted_category: str
+    priority: str
+    urgency_score: float
+    recommended_action: str
+    probability: float
+    latency_ms: float
+
+
+# -----------------------
+# Health check
+# -----------------------
+
+@app.get("/")
+def health_check():
+    return {"status": "API is running"}
+
+# -----------------------
+# Prediction endpoint
+# -----------------------
+
+@app.post("/predict", response_model=TicketResponse)
+def predict_ticket(ticket: TicketRequest):
+    start_time = time.time()
+
+    text = clean_text(ticket.subject + " " + ticket.description)
+    X = vectorizer.transform([text])
+
+    prediction = model.predict(X)[0]
+    probability = model.predict_proba(X).max()
+
+    urgency_score = compute_priority(text, prediction)
+
+    if urgency_score >= 0.75:
+        priority = "High"
+        action = "Immediate human escalation"
+    elif urgency_score >= 0.4:
+        priority = "Medium"
+        action = "Queue for standard resolution"
+    else:
+        priority = "Low"
+        action = "Automated or delayed handling"
+
+    latency = (time.time() - start_time) * 1000
+
+    return TicketResponse(
+        predicted_category=prediction,
+        priority=priority,
+        urgency_score=round(urgency_score, 2),
+        recommended_action=action,
+        probability=round(float(probability), 4),
+        latency_ms=round(latency, 2)
     )
-
-    X_vec = vectorizer.fit_transform(X)
-
-    # Train / Test split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_vec, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    # Logistic Regression classifier
-    model = LogisticRegression(
-        max_iter=1000,
-        class_weight="balanced"
-    )
-
-    model.fit(X_train, y_train)
-
-    # Save artifacts
-    joblib.dump(model, MODEL_PATH)
-    joblib.dump(vectorizer, VECTORIZER_PATH)
-
-    print("Model and vectorizer saved successfully.")
-
-if __name__ == "__main__":
-    train_model()
