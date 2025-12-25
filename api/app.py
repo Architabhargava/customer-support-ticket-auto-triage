@@ -15,6 +15,29 @@ VECTORIZER_PATH = "models/tfidf_vectorizer.pkl"
 model = joblib.load(MODEL_PATH)
 vectorizer = joblib.load(VECTORIZER_PATH)
 
+#compute priority score
+def compute_priority(text, category):
+    urgency = 0.0
+
+    urgent_words = ["urgent", "immediately", "blocked", "down", "refund", "crash"]
+    for word in urgent_words:
+        if word in text.lower():
+            urgency += 0.15
+
+    category_weight = {
+        "Bug Report": 0.4,
+        "Billing Inquiry": 0.3,
+        "Technical Issue": 0.25,
+        "Account Management": 0.2,
+        "Feature Request": 0.1
+    }
+
+    urgency += category_weight.get(category, 0.2)
+
+    # time decay (simplified example)
+    urgency = min(urgency, 1.0)
+    return urgency
+
 # -----------------------
 # FastAPI app
 # -----------------------
@@ -39,8 +62,12 @@ class TicketRequest(BaseModel):
 
 class TicketResponse(BaseModel):
     predicted_category: str
-    confidence: float
+    priority: str
+    urgency_score: float
+    recommended_action: str
+    probability: float
     latency_ms: float
+
 
 # -----------------------
 # Health check
@@ -58,20 +85,31 @@ def health_check():
 def predict_ticket(ticket: TicketRequest):
     start_time = time.time()
 
-    # Combine & clean text
     text = clean_text(ticket.subject + " " + ticket.description)
-
-    # Vectorize
     X = vectorizer.transform([text])
 
-    # Predict
     prediction = model.predict(X)[0]
     probability = model.predict_proba(X).max()
 
-    latency = (time.time() - start_time) * 1000  # ms
+    urgency_score = compute_priority(text, prediction)
+
+    if urgency_score >= 0.75:
+        priority = "High"
+        action = "Immediate human escalation"
+    elif urgency_score >= 0.4:
+        priority = "Medium"
+        action = "Queue for standard resolution"
+    else:
+        priority = "Low"
+        action = "Automated or delayed handling"
+
+    latency = (time.time() - start_time) * 1000
 
     return TicketResponse(
         predicted_category=prediction,
-        confidence=round(float(probability), 4),
+        priority=priority,
+        urgency_score=round(urgency_score, 2),
+        recommended_action=action,
+        probability=round(float(probability), 4),
         latency_ms=round(latency, 2)
     )
